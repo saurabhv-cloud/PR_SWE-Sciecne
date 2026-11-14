@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hicparams"
+version = "0.1.0"
+description = "Per-library parameter estimates from Hi-C pair files"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

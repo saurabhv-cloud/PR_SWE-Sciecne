@@ -1,0 +1,8 @@
+{
+  "assay": "in-situ Hi-C",
+  "mapq_min": 30,
+  "min_cis_distance": 1000,
+  "min_unique_pairs": 30000,
+  "fragment_map": "fragments.bed",
+  "dedup_rule": "exact_coordinates_strand"
+}
