@@ -1,1 +1,1 @@
-# PR_SWE-Sciecne
+# PR_SWE-Science
