@@ -1,0 +1,583 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+## [Unreleased]
+
+### Highlights
+
+* **MyoChallenge 2026: ChaseTag quickstart (tutorial 5.6).** A Colab for invited teams: register at
+  [mc26.myosuite.org](https://mc26.myosuite.org), export the tutorial 5.4 walker to ONNX, submit one player that
+  plays both chase and evade (546 observations, 354 muscle activations) and watch the result on the website.
+  It can also load and render `myoChallengeChaseTagFBVs-v0`.
+
+* **Photorealistic Blender rendering of any MyoSuite rollout ([#540]).** One command turns a CPU rollout of a
+  trained policy (`--checkpoint`) or of random actions (`--random`) into a Cycles render: animated USD export,
+  a studio scene, ivory bones and volumetric muscles that thicken as they shorten and redden with activation.
+
+  ```bash
+  python scripts/render_blender.py --env myoLegWalk-v0 --checkpoint <run> --output leg-render
+  ```
+
+  ![Blender rendering of myoLegWalk-v0](docs/source/images/blender/leg_gait.webp)
+
+  - Muscle volumes measured for the large leg and shoulder muscles (`myosuite.viz.muscle_tubes`), or MuJoCo's
+    thin muscle paths; colour by activation or uniform (`--muscle-color`).
+  - Optional body skin from a MuJoCo `.skn` file (`--skin`, translucent or opaque; `myosuite.viz.skin`), with a
+    bundled full-body skin adapted from MakeHuman/MPFB (CC0 1.0) and fitted over the muscle atlas; `ViserSkin` draws it in mjviser.
+    The bundled skin is smooth in motion: a slimmer forearm and wrist that rotate with the muscles under them, and
+    shoulder weights that keep the skin from folding as the arm is raised or rotated.
+    `--skin-texture` puts a colour image on the skin (the bundled skin takes textures in MakeHuman's UV layout).
+    `python -m myosuite.viz.skin_glb` round-trips a skin through a rigged `.glb` to paint its blend weights in Blender;
+    `--skin` also takes the `.glb`. Its bones are chained along the body tree, so the
+    rig poses like a skeleton in Blender.
+  - Anatomical muscle meshes in place of the tubes (`--muscle-mesh atlas|atlas-hd|PATH.glb`): 416 BodyParts3D
+    muscles (CC BY 4.0), each weighted to the bones it attaches to, downloaded from the Hugging Face dataset
+    `myohub/myosuite-assets` on first use. They bind to every body that draws the full body's bone meshes: arm and
+    hand models get the muscles whose bones they have, several bodies in one model one set each (`--muscle-mesh-env`).
+  - Preview, video and export-only modes; the `studio` or the task's own `mujoco` scene; tutorial 3.6.
+  - Needs the optional MuJoCo USD dependencies and a separate Blender installation.
+  - `checkpoint_utils.load_policy(..., strict=True)` raises instead of falling back to a random policy.
+
+### Added
+
+* **`myoMimic-v0`: multi-clip full-body motion tracking, on the CPU and on mjlab.** The task tracks the AMASS KIT
+  motions retargeted onto the task model (by default MuscleMimic's 972 KIT training motions, `motion.clips="kit_train"`,
+  the clips its released checkpoints were trained on; any clip, directory or `.txt` list works too; read from the local retarget cache that `scripts/mimic/retarget_amass.py` fills from an AMASS download,
+  or from `$MYOSUITE_KIT_ROOT`) with myo_sim's
+  `myofullbody`. It is defined apart from the body model and the learning method:
+  - task: observations from a shared vocabulary (`myosuite.terms.mimic_track`, pure NumPy/torch functions a method can
+    also differentiate), MimicReward as the proposed dense reward, a failure rule (mean relative site deviation 1 m,
+    root position 1 m, root orientation 1 rad) and success metrics that do not depend on the control step
+    (`myosuite.envs.myo.tasks.mimic.tracking.metrics`: tracked-to-end, normalized return per second, MPJPE, joint
+    error, plus MuscleMimic's 0.5 m rule as an extra column; `unflagged` repeats them without the clips whose
+    metadata carries `quality_flags`);
+  - model: `EnvConfig.model` / `make_env(..., model=...)` picks the body of an id registered with
+    `register_env(models=...)` (`"myofullbody"` so far);
+  - method: typed presets (`MimicTaskCfg`, default `"supermimic"`) with dotted overrides through
+    `EnvConfig.task_kwargs={"preset": ..., "overrides": {...}}`; the control step is `EnvConfig.ctrl_dt` (default 0.02 s).
+
+  The mjlab twin reads the CPU registration (`register_cpu_twins`) and takes the muscle-command features.
+  Clips are matched to the body by a kinematic fingerprint (`models.kinematic_fingerprint`: joints, body tree,
+  coupling polynomials, landmark bodies and foot collision geoms), so they keep loading under myo_sim releases that
+  leave the body's kinematics alone; on a mismatch the error names the myo_sim version the clips were fitted for.
+  `retarget_amass.py --stamp-fingerprint DIR` adds the fingerprint to clips fitted without it (qpos untouched).
+  `make_env` also accepts `model=` and `ctrl_dt=` as keywords. `myoMimicFullbody-v0` is unchanged.
+  Methods may replace the reward (`overrides={"reward_fn": fn}` with a pure `fn(state, ref, ctrl_dt)`, or a whole
+  `RewardCfg`); the proposed reward is then still reported (`info["task_reward"]`, the twin's `task_reward`).
+* **AMASS SMPL+H motions straight onto a body model** (`myosuite.biomechanics.smplh`, `.retarget_smplh`,
+  `.retarget`; `scripts/mimic/retarget_amass.py`). SMPL+H forward kinematics in NumPy (subject shape, gender-specific
+  model) and one explicit SMPL+H -> model table, calibrated on the model in SMPL's T-pose (GMR's approach, as MuscleMimic
+  used it): per-segment proportion scaling, limb orientation targets and a per-frame ground height from the subject's foot
+  contacts. A landmark IK solves each frame for the root and the independent joints only, so the joint couplings hold
+  exactly; joint limits are hard, and smoothing keeps frames continuous. Thighs, shanks, feet and forearms follow the
+  subject's segment directions between joint centres, so knee, ankle and elbow angles do not inherit SMPL+H's rest pose
+  (its knees are 4-6 deg flexed, the left more than the right); where the model couples a twist to a hinge (the knee),
+  the shank's axial twist is weighted down (anisotropic orientation targets); the elbows follow the source's
+  upper-arm/forearm angle in the model's own convention (per-frame posture priors). On the 1080 KIT clips on
+  myofullbody (myo_sim 0.2.4): no foot penetration, contact sliding 0.084 m/s (MuscleMimic's GMR clips: 0.093), the
+  knees at their 0 limit on 5.4% (left) and 1.7% (right) of frames, elbow flexion within 0.2 deg of the source's
+  (median). The source's knee range goes into each clip's metadata, and `--quality-flags` adds curation flags
+  (`quality_flags`). `myoMimic-v0` uses these clips and refuses clips fitted on another model or model version.
+* **myoSuperMimic, a training project in `training/supermimic/`** (experimental; import name `supermimic`, not part of
+  the `myosuite` package): SuperMimic (Liao et al.) on `myoMimic-v0`, a port of muscle-supermimic (Apache-2.0) with
+  supermimic_vibed and BlinkMimic / InstantTrack (MIT) parts and systems options after XMimic (MIT); licences and
+  notices in the project. It trains, evaluates, refines and fine-tunes through `make_env`, scoring imagined states
+  with the task's pure terms through its own differentiable kinematics, muscle geometry and activation dynamics.
+  Install: `pip install "git+https://github.com/MyoHub/myosuite.git@dev#subdirectory=training/supermimic"` (pulls in
+  `myosuite[mjlab]`); usage and results in `training/supermimic/README.md`.
+* **`projected_joint_couplings`** (`myosuite.physics.joint_coupling`): the joint-coupling projection out of place,
+  differentiable with Torch, in `JointCouplings`' topological order; `JointCouplings.as_torch`.
+* **`build_native_mimic_fullbody_spec` takes `model_name`** (default `"myofullbody"`), the myo_sim full body to build.
+* **`make_env(..., backend="mjlab", seed=...)`** sets the env config's seed. The `myoMimic-v0` `ModelInfo` exposes
+  the joint-coupling map, the root body name, `qpos0` and the muscle and muscle-tendon names.
+* **Muscle effort metrics for recorded rollouts:** `myosuite.biomechanics.effort` adds `squared_activation` (mean over time of `sum a^2`), `wasted_torque` and `cocontraction_index` (torque antagonists cancel, as in the co-contraction cost of [#607]) and `muscle_saturation` with `muscle_saturation_bounds` (the saturation metric of [#588] by Mark Colley, [#566]). Pure functions on NumPy arrays or torch tensors of shape `(..., T, M)`; no env coupling.
+
+* **`load_fbvs_player` / `export_fbvs_onnx`** in `myosuite.integrations.musclemimic.fbvs_player` wrap a tutorial 5.4 walker as a ChaseTag FBVs player (546 -> 354) and write the ONNX the MyoChallenge server runs; tutorial 5.6 uses them instead of an inline wrapper ([#617]).
+* **`decode_synergies(model, syn)`** in `myosuite.integrations.musclemimic.sar_extraction` maps SAR synergy activations back to muscle activations (the NumPy inverse of `encode_activations`); tutorial 5.5 uses it instead of its own decoder ([#616]).
+* **Rollout videos without hand-written render loops:** `myosuite.viz.rollout_video` adds `record_rollout(model, data, step, n_steps)` (renders after each step, stops early when `step` returns `False`), `tracking_camera` (follows the free root body) and `offscreen_size`; `MotionClip.to_mjdata(model, frame)` returns a posed, forwarded `MjData`. Tutorials 5.1 and 5.5 use them instead of their own render loops ([#613]).
+* **Inverse dynamics of motion clips** (`myosuite.biomechanics.inverse_dynamics`): `clip_kinematics` smooths a clip (optional zero-phase Butterworth, Winter's convention), projects the joint couplings and differentiates it twice on the configuration manifold (second order, quaternions included); `inverse_dynamics` returns the generalized forces `M qacc + qfrc_bias - qfrc_passive - external` per frame, as `mj_inverse` with constraints off. The first step of muscle-level analysis after scaling and IK.
+* **Static optimization** (`myosuite.biomechanics.static_optimization`): muscle activations that reproduce a motion's inverse dynamics, minimising the sum of squared activations with MuJoCo's own force-length-velocity muscle model at each frame, reserve actuators on every dof (residuals on free joints) and the joint couplings' forces as free multipliers, as in OpenSim's static optimization. `StaticOptimizer` solves one frame at a time with a warm-started OSQP problem, so the same code runs on recorded clips and on a live stream (myoArm about 1 kHz, MyoFullBody 40-160 Hz on one CPU core). Each dof's reserve defaults to 0.005 of its peak actuator torque (`reserve_fraction`): 1-4 N m at MyoLeg's hip, knee and ankle, about 5 mN m at MyoHand's fingertips. On tutorial 3.3's former MyoHand trajectory, OpenSim's fixed 1 N m reserves carry 67 % of the joint torques and the scaled ones 26 %; smaller fractions leave that share at 25 % (a muscle is at full activation in a quarter of the frames), so it marks torques the hand's muscles cannot produce. `StaticOptimizer.config` holds the weights as solved.
+* **Ground reactions without force plates:** `StaticOptimizationConfig(contact_forces=True)` adds contact forces at MuJoCo contacts with world-fixed bodies (floor, chair, table) within `contact_distance` to the static optimization, on MuJoCo's friction pyramid (pushing only, friction-limited), with a capacity that fades with the gap; residuals are then penalised. `StaticOptimizationResult.contact_force` gives the world-frame contact force on each body and `contact_qfrc` its generalized force. Standing MyoLeg: 99.9 % of body weight, evenly between the feet; a retargeted KIT walk on MyoFullBody shows the double-hump vertical force (1.32 / 0.77 / 1.25 body weights). `contact_distance` stays 1 cm: OpenSim's subject01 walk floats 8-10 cm above the floor on the unscaled MyoLeg, and lowering its root until the lowest foot touches the floor cuts the root residual from 1.02 to 0.11 body weights RMS (0.04 with 1 cm of penetration), while a 5 cm reach puts up to 0.15 body weights on feet 1.5 cm or more off the floor.
+* **Per-frame activation bounds in static optimization:** `StaticOptimizer.solve(max_activation=..., min_activation=...)` bounds each actuator's activation for one frame within its own range, e.g. caps at `1 - MF` of a fatigued muscle (the load moves to synergists and then to the reserves) or the activations that activation dynamics can reach. The live shadow model that uses them lives in [M-Colley/myosuite-shadow](https://github.com/M-Colley/myosuite-shadow).
+* **OpenSim motions on MyoSuite models** (`myosuite.biomechanics.opensim_motion`): `read_opensim_motion` reads `.mot` / `.sto` files (OpenSim and SIMM headers), and `opensim_motion_to_qpos` maps their coordinates onto a model's joints by name (gait2392's knee sign flipped, couplings projected) and the six pelvis coordinates onto the free root (body-fixed z-x-y rotations, Y-up ground into the Z-up world). On OpenSim's subject01 walk mapped onto MyoLeg, the pelvis axes stay within 2.8 deg (mean) of the ASIS and sacral markers.
+* **Uncertainty bands for muscle estimates** (`myosuite.biomechanics.uncertainty`): `static_optimization_bands` repeats kinematics, inverse dynamics and static optimization on Monte Carlo samples of tracking noise, per-muscle strength and per-segment mass (log-normal, mean 1) and returns quantile bands of activations, forces, reserves, joint torques and contact forces next to the nominal solution; reserve, residual and contact weights stay the nominal model's in every sample. On the elbow, 90 % bands hold subjects drawn from the strength prior at the rate finite sampling predicts.
+* **DynSyn muscle synergies for PPO** (He et al., ICML 2024, [arXiv:2407.11472](https://arxiv.org/abs/2407.11472)) as the method project [`training/dynsyn`](training/dynsyn) ([#572]): `python -m myosuite_dynsyn.groups` groups a task's muscles by how their lengths change together under random joint motion, and `python -m myosuite_dynsyn.train` trains the registered mjlab task with one action per group, optionally plus bounded per-muscle corrections that grow during training (`--max-amplitude`, `--start-steps`, `--ramp-steps`). Install it next to MyoSuite with `pip install "git+https://github.com/MyoHub/myosuite.git@dev#subdirectory=training/dynsyn"`. MyoSuite itself gets only the playback side: `myosuite.utils.action_map` (the `ActionMap` protocol, the `DynSyn` map, the CPU `ActionMapWrapper`, and `trained_action_map` / `load_policy` for checkpoints; no torch or mjlab at import) and the mjlab action term `ActionMapActionCfg` in `backends/mjlab/tasks/mdp/action_map.py`. Checkpoints record their map (`action_map` in their `infos`; `write_manifest(..., action_map=)` for `manifest.json`), so `scripts/eval_mjlab_policy.py` plays them on both backends without `training/dynsyn`. `load_rslrl_policy` refuses checkpoints that record a map unless `action_map_applied=True`; mjlab's own `play` and `train`, and `scripts/train_mjlab.py`, don't check and read them as per-muscle actions. No registered env changes.
+* **Role-aware ChaseTag 1v1 teacher player.** `ChaseTagSteeredPair` walks `amathislab/mm-10m-2` on the existing 8-bin walk clips. Both agents look at each other; the chaser walks toward the opponent and the runner walks away. Headings turn off the ±6 m fence (and root XY is clamped) so walkers stay inside the arena. Tutorial [5.7](tutorials/5.7_ChaseTag_Steered_Teacher.ipynb) plays it ([#579](https://github.com/MyoHub/myosuite/pull/579), [#578](https://github.com/MyoHub/myosuite/pull/578)). Scored FBVs observation (546-d) is unchanged. `mm-10m-2` needs musclemimic_models 1.0.5.
+* **ChaseTag teacher from a myoSuperMimic tracker** (`training/chasetag_teacher`, a self-contained training project): a tracker trained with `training/supermimic` on `myofullbody`, steered toward or away from the opponent by motion matching over KIT locomotion clips, and distilled by DAgger into a yaw-canonicalised 546→354 student whose ONNX takes the raw scored observation. No clips or checkpoints are shipped.
+* **Configurable fatigue rest threshold:** `CumulativeFatigue`, `TorchFatigueState` and `TorchFatigueState.from_mj_model` take `rest_threshold=` (and `set_RestThreshold`), the command at or below which 3CC-r applies the rest-recovery multiplier `r`. With noisy excitations estimated from body tracking, a threshold above the noise floor lets a relaxed muscle rest. It must lie in `[0, 1)`; the default stays `FATIGUE_REST_THRESHOLD = 0.01`, so every registered env is unchanged. The experimental JAX step keeps 0.01.
+* **Fatigue on a subset of muscles:** `CumulativeFatigue`, `TorchFatigueState.from_mj_model` and `FatigueWrapper` take `muscles=` (actuator names or ids). Only those muscles fatigue, with their usual per-group F/R/r; the other excitations pass unchanged. A non-muscle actuator raises `ValueError`. The default (`None`, every muscle in model order) behaves as before. mjlab twins follow the CPU wrapper through the new `MyoActionCfg.fatigue_muscles`.
+* **`myoFullBodyWaypoint-v0`: ordered waypoints for the MyoFullBody, on the CPU and on mjlab.** A random 4-waypoint
+  route is drawn at every reset; the reward pays progress toward the active waypoint, +1 per arrival and -10 on a fall
+  (so ending early never pays); the observation has no world `x, y` and gives the next waypoints in the heading frame.
+  `myosuite.envs.waypoint.WaypointEnv` takes any scene (`model_recipe`/`model_path` plus an `MjSpec` `edit_fn`, or a
+  compiled model) and a typed `WaypointTaskCfg`; the goal terms (`myosuite.terms.waypoint`) are shared with the twin.
+  The `musclemimic_fullbody` recipe now builds through `build_from_recipe` (its spec carries the CPU timestep).
+* **Waypoint instance overrides:** customize `myoFullBodyWaypoint-v0` through `EnvConfig.task_kwargs` on CPU and mjlab without registering course IDs. XML scenes replace the default recipe; seeded construction is supported.
+* **Terrain tracking in MuscleMimic**, credited to TERRA-4B (`myosuite.integrations.musclemimic`): the TERRA actor, its observation (heightmap, reference
+  goal) and NumPy inference, plus a planner that walks a clip along waypoints. Tutorial 4.4 drives TERRA through a
+  programmatic obstacle course.
+
+* **Checkpoint manifests record the `musclemimic_models` release** for envs whose body comes from that package (MuscleMimic, full-body directional locomotion, full-body waypoints). Releases differ in physics but not in the env contract, so the contract hash cannot tell them apart; `checkpoint_models_version()` now reads the release from a local checkpoint's `manifest.json`, and `download_baseline_file` fetches the folder's manifest with the file. Manifests without the field, and code that ignores it, behave as before.
+* **Newton compatibility diagnostics:** the release/manual informational conversion probe is supplemented by matched CPU/CUDA trajectories, source identity maps, mutation checks and versioned reports. [Newton PR 5029](https://github.com/newton-physics/newton/pull/5029) and [Newton PR 5030](https://github.com/newton-physics/newton/pull/5030) fix the joint equality and partial vector import gaps on Newton main, so all twelve authored/normalized cases convert with every muscle and length range; the default changes for masses, options, contacts and margins remain in [Newton PR 4903](https://github.com/newton-physics/newton/pull/4903). Strict name/force comparisons and several trajectory cases still fail, with follow-ups in [Newton issue 4904](https://github.com/newton-physics/newton/issues/4904), [MuJoCo-Warp issue 1835](https://github.com/google-deepmind/mujoco_warp/issues/1835) and [#563]. The trajectory probe now passes each reference model's integrator to `SolverMuJoCo` and records it per case. MyoSuite models leave the integrator at MuJoCo's default, Euler, which Newton's import replaces with implicitfast; the conversion probe still reports that as an option difference. Where Newton merges a body's hinge and slide joints and leaves their DoFs unlabelled, as Newton main and 1.8.0rc1 do, the trajectory probe maps each DoF to its source joint by the merged joint's name and DoF order, so it no longer needs a patched Newton. Newton remains outside the supported CPU and mjlab backends (#368, [#531]).
+
+### Changed
+
+* **Inverse kinematics moved to `myosuite.biomechanics.inverse_kinematics`**, next to the other biomechanics tools in `myosuite/biomechanics/` (NumPy, SciPy and MuJoCo only). `myosuite.physics.inverse_kinematics` re-exports it.
+* **Baseline downloads fall back to `main` when the release's tag doesn't hold the file:** `download_baseline_file` and `download_baseline_checkpoint` treat a file that is missing from the tag like a missing tag, so baselines added after a release's tag (such as the ChaseTag ONNX) download without pinning a revision.
+* **`myoFingerReachRandom-v0` and `motorFingerReachRandom-v0` targets on MuJoCo 3.12 and newer.** The table of reachable targets checked joint types with a comparison that is always false from MuJoCo 3.12, so no joint was sampled and every target sat at the fingertip's start. Both envs, on the CPU and in mjlab, now sample the full table on every version.
+* **`mujoco<4`, `mujoco-warp<4` and `mujoco-mjx<4`.** MuJoCo 4 changes how spatial tendons use side sites, which moves some muscle paths in the models, so this release stays on MuJoCo 3. The `[mjx]` extra caps `mujoco-mjx` as well: `mujoco-mjx` 4.0 depends on `mujoco-core` 4.0, which installs its `mujoco` module over MuJoCo 3's, and `mujoco.mjx` then fails to import.
+* **The `[mjx]` extra no longer installs `playground`.** `playground` 1.0 (2026-11-06) is a rewrite on PyTorch, `reaf-sim` and MuJoCo Warp with no JAX/MJX API, and its JAX line stays at 0.2.0. The MJX backend now carries the few pieces of 0.x it used: `State`, the substep loop and the brax auto-reset wrapper. So it works with `playground` 0.x, 1.0 or none installed.
+  - Import `wrap_for_brax_training` and `State` from `myosuite.envs.myo.backends.mjx.brax_env` instead of `mujoco_playground`. The module carries playground's Apache-2.0 notice. Rollouts through it are bit-identical to 0.2.0's.
+  - `[mjx]` lists `warp-lang>=1.11` (for `mjx_impl="warp"`) itself, which `playground` 0.2.0 used to bring.
+* **`motorFinger*` motor gears come from `myo_sim` 0.2.4.** `myo-sim` moves to 0.2.4, whose `motorfinger_v0.xml` has gears of 160/80/80/160/160 (`extn`, `adabR`, `adabL`, `mflx`, `dflx`). The `motor_finger` recipe loads that XML as it is and no longer scales it, so the four `motorFinger*` envs go from 80/20/20/40/40 to these gears. Their dynamics change while observations, actions and control step stay the same; checkpoints trained on the earlier gears no longer apply (`docs/baseline_checkpoints.md`).
+* **ChaseTag 1v1 (`myoChallengeChaseTagFBVs-v0`) win conditions.** Tag (planar pelvis distance ≤ 0.5 m) or a pursuer fall ends the episode; timeout with no tag is a runner win. A runner fall does not stop play — the pursuer can still tag the body on the ground. Boxing/fencing still end on any fall. P1 ChaseTag is unchanged.
+* **Dependency floors.** `filelock` is at least 4.2.5 on Python 3.11 and newer, and stays on 3.25.2 for Python 3.10 (4.x requires 3.11, and later 3.x releases add advisories). `certifi`, `gitpython`, `msgpack`, `setuptools`, and `black` move to releases that clear current advisories. Pillow stays `>=10.1.0,<13`: 13.0.0 is the first release that clears the image advisories, and current gradio still requires `pillow<13`.
+* **mjlab PPO defaults of the muscle tasks bound the action std ([#566]).**
+  - The runner configs build their Gaussian policy from the new `muscle_gaussian_distribution_cfg()` (`tasks/rl.py`),
+    which keeps the std in `std_range=(0.05, 1.0)` with `ProjectedGaussianDistribution` (`tasks/distribution.py`).
+    It projects the std parameter onto the range before every forward pass. Unlike rsl_rl's own `std_range` clamp,
+    which has no gradient at or beyond a bound, this keeps the std trainable at the bounds. The checkpoint key
+    (`distribution.std_param`) is unchanged, and `init_std` must lie strictly inside the range.
+  - These configs are `myo_ppo_runner_cfg` (pose, reach, leg, torso, and the motor-driven `motorFinger*` tasks, whose
+    actions are clipped to [-1, 1] before the linear map to `ctrlrange`), `default_mimic_clip_on_policy_runner_cfg`
+    (MuscleMimic, and the SAR tasks of tutorial 5.5 that register with it), ChaseTag FBP2, table tennis and the elbow
+    benchmark config.
+  - MuscleMimic (with those SAR tasks), ChaseTag, table tennis and the elbow config also start at std 0.5 (was 1.0)
+    and use an entropy bonus of 0.001 (was 0.01), the values pose and reach already used (`MUSCLE_ENTROPY_COEF`).
+  - Pose, reach, leg, torso and `motorFinger*` training changes too, since their std was unbounded before. In a
+    `myoElbowPose1D6MRandom-v0` run without the bound, the smallest std fell below 0.05 after 220 iterations, with the
+    return already flat, so longer runs now train partly at the floor.
+  - Why: once a control saturates, its return no longer depends on its std, and the entropy bonus is the only
+    systematic gradient left on it. Adam normalizes the gradient's scale, so the std rises by up to the learning rate
+    per update. The noise of PPO's surrogate gradient makes the rise smaller: in a simulation of saturated muscles at
+    the MuscleMimic minibatch size (6144 samples), 0.49 of the learning rate with entropy 0.01 and 0.06 with 0.001. A
+    2B-step `myoMimicFullbody-v0` run (entropy 0.01) ended at std 14, with 99 % of controls saturated. The bound
+    limits this drift; it does not by itself prevent saturated (bang-bang) controls.
+  - Training defaults only. Observations, actions and dynamics are unchanged, and published checkpoints load and
+    evaluate as before. `load_rslrl_policy` (`eval_mjlab_policy.py --stochastic`) clamps the std to the run's
+    `std_range` when its `params/agent.yaml` gives one, as in training. Retraining with the new defaults can give
+    different policies (`docs/baseline_checkpoints.md`).
+  - The MuscleMimic config's docstring now describes its actual settings.
+
+* **Fatigue groups and parameters for every muscle of the bundled models.**
+  - `_muscle_group` now also strips MuscleMimic's `_left` side suffix, the `a0_`/`a1_` agent prefix of two-agent
+    scenes and an `R:`/`L:` side prefix. Before, the MuscleMimic left arm (32 muscles, 63 with fingers) and all 708
+    muscles of `myoChallengeChaseTagFBVs-v0` fell back to `Default`, so the two arms fatigued differently.
+  - New rows, each cited in `MUSCLE_FATIGUE_PARAMS` and `docs/source/fatigue_validation.rst`: `Trunk` for the 108
+    lumbar and abdominal muscles of MyoTorso and the MuscleMimic torso (Frey-Law et al. 2012 trunk fit),
+    `Thigh-Hamstring` (Frey-Law et al. 2012 knee fit with r = 15 of Looft et al. 2018; no knee-flexor fit is
+    published) and `Hip` (the general fit, now explicit: no hip fit is published, Yang et al. 2025).
+  - Regrouped: the forearm rotators `SUP`, `PT`, `PQ` (were elbow extensor, elbow flexor, wrist flexor) use the
+    joint-level `Elbow` row; `APL` is a wrist extensor (was flexor); the rotator cuff is labelled as rotators (no
+    numeric change).
+  - Changes the fatigue dynamics of `myoFati*` envs with torso, hamstring, forearm-rotator or `APL` muscles: torso,
+    table tennis, soccer, full-body ChaseTag, leg walk/stand, arm reach, bimanual, relocate and the hand envs
+    (`docs/baseline_checkpoints.md`).
+* **Full-body ChaseTag uses only myo_sim's `myofullbody`.** `myoChallengeChaseTagFBVs-v0` and `myoChallengeChaseTagFBP2-v0` (and its variants) build the released body and no longer use `musclemimic_models`, whichever version is installed. Joints, muscles, observations and actions keep their order and size, but the dynamics change (passive joint parameters and equalities differ), so policies trained on the MuscleMimic body should be re-evaluated. FBVs starts from the model's `qpos0`. Its reward still reads one reference clip from the `amathislab/musclemimic-retargeted` dataset. Checkpoint manifests of these envs no longer record a `musclemimic_models` release.
+* **Full-body ChaseTag lasts 10 s instead of 20 s** (`myoChallengeChaseTagFBVs-v0`, `myoChallengeChaseTagFBP2-v0` and its variants; 1000 control steps). Scores rescale with the limit: a tag after 3 s scores 0.70 instead of 0.85. The myoLeg ChaseTag envs stay at 20 s.
+* **Baseline for the scored 1v1 game:** `onnx/chasetag_fbvs_baseline.onnx` in the `myohub/myosuite-3-baselines` Hugging Face repo (`myosuite.core.hf_io.download_baseline_file`) (546 -> 354; `docs/baseline_checkpoints.md`).
+* **ChaseTag 1v1 (`myoChallengeChaseTagFBVs-v0`) win conditions.** Tag (planar pelvis distance ≤ 0.5 m) or a pursuer fall ends the episode; timeout with no tag is a runner win. A runner fall does not stop play — the pursuer can still tag the body on the ground. Boxing/fencing still end on any fall. P1 ChaseTag is unchanged. The train env (`myoChallengeChaseTagFBVsTrain-v0`) uses the same rules.
+* `myoLegDirectionalForward-v0` and `myoLegDirectionalBackward-v0` swapped names. The leg model faces `-y`, so the
+  old "forward" task (`heading_dir=(0, 1)`, 1.2 m/s) trained walking backwards and the old "backward" task
+  (`heading_dir=(0, -1)`, 1.0 m/s) walking forwards. Forward is now `(0, -1)` at 1.0 m/s and Backward `(0, 1)` at
+  1.2 m/s; the baseline checkpoints moved with their task definitions (`docs/baseline_checkpoints.md`).
+  `myoLegDirectionalRandom-v0` is unchanged.
+* Baseline downloads look for the patch-release tag first (`v3.0.1`), then the minor-release tag (`v3.0`), then
+  `main`, so a patch release can ship changed baselines without changing those of earlier releases.
+
+### Fixed
+
+* **MuscleMimic checkpoints load on JAX ≥ 0.10.** `load_local_policy_artifacts` restored the Orbax `train_state` without a target, so Orbax rebuilt each array's sharding from the device name saved in the checkpoint (`TFRT_CPU_0` for `amathislab/mm-10m-2`), which JAX 0.10 renamed to `cpu:0`. Every MuscleMimic policy load (tutorials 5.1, 5.4 and 5.5, `myosuite-musclemimic-fullbody-eval`, `export_onnx --framework orbax`) failed with `Device TFRT_CPU_0 was not found in jax.local_devices()`. It now restores against the checkpoint's own metadata placed on the CPU device ([#614]).
+* **Tutorial 5.4 / 5.6 on musclemimic_models 1.0.6.** Directional and ChaseTag FBVs use the package default. Colab Run-all loads `HeadingTablePolicy` (`tutorials/files/5.6/policy_heading_table.pt`). The heading reward uses world-frame root velocity.
+* **Motion clips load without pickle:** `load_motion_clip`, the CPU Mimic clip env and the full-body observation adapter open `.npz` files with `allow_pickle=False` (unpickling a downloaded file can run code). Names stored as bytes now read as text instead of `"b'name'"`, and a pickled name array is refused with instructions for re-saving it. SAR synergy metadata is written as strings, and older folders still load ([#522]).
+* **Pen twirl shows success on the target pen:** `myoHandPenTwirlFixed-v0` / `myoHandPenTwirlRandom-v0` add a `target_ball` site on the target pen that turns green while the task is solved and red otherwise, as in die reorientation. The yellow `eps_ball` (the pen's position goal and drop radius) moves to the hidden site group 4, so it no longer covers the pen being twirled ([#136]). Observations, rewards and dynamics are unchanged; the model gains one site.
+* **Resampled terrain is drawn in every renderer:** the rough/hilly/stairs leg walks, ChaseTag and RunTrack upload the terrain heightfield to the live renderers after each reset (`MyoGymnasiumEnv._upload_hfield_to_renderers`). Render contexts copy heightfields when they are created, so the `mj_render()` window, `render()` frames and cached offscreen videos showed the first episode's terrain while the physics used the new one ([#307]). Observations and dynamics are unchanged.
+* Fixed initial fatigue arrays retain their requested values across CPU episodes. `CumulativeFatigue.reset` copies `fatigue_reset_vec` into owned state. Stepping previously mutated writable NumPy arrays supplied by callers and failed on read-only arrays.
+* **`make_env(..., backend="mjx")` builds MyoSuite's MJX envs.** It loaded them from `mujoco_playground.registry`, which only knows playground's own envs, and `register_task(..., backends={"mjx"})` called `registry.register_environment`, which no playground release has. With the real package, both failed (`Env ... not found`, `AttributeError`). MyoSuite's registry now keeps the MJX twins of `register_task`, and `make_env` builds them or the `Mjx*-v0` envs.
+* **`scripts/train_mjlab.py --help` works when piped or redirected on Windows:** such a stdout uses the ANSI code page (e.g. cp1252), which cannot encode the `→` that the help prints from mjlab's docstrings, so the script exited with `UnicodeEncodeError`. Characters the stream cannot encode are now escaped (`\u2192`), as Python already does on stderr. Output that encoded before is unchanged.
+* **Parallel env builds on Windows share the generated model XMLs safely:** processes that build envs at once with an empty temp dir (SB3 `SubprocVecEnv` workers on first use, `pytest -n`) could fail with `PermissionError: [WinError 5]` while writing a patched model XML, or MuJoCo could read it as an empty file. A patched XML another process already wrote is now kept instead of replaced, and Windows' brief refusals are retried (`asset_path_resolver.write_atomic`). `materialize_recipe_xml`, which writes the mjlab and MJX hand model, writes atomically too, and its default file is named by its content (`<tempdir>/myosuite_recipes/<name>_<digest>.xml`). Models, observations and dynamics are unchanged.
+* **Long fatigue steps recover instead of fatiguing: the 3CC-r step is exact for any `dt`.** `CumulativeFatigue.compute_act`, `TorchFatigueState.step` and the JAX `cumulative_fatigue_step` share one closed-form step (`muscle_conditions.three_cc_r_step`). A single explicit step held the start-of-step `MA` for the whole interval, so a long rest passed in one call kept fatiguing the muscle: one 300 s rest step after a 60 s hold at 40 % raised the elbow `MF` from 0.24 to 0.74 instead of lowering it to 0.01. Steps above `1 / F` (about 90 s) also inverted the compartment bounds. The new step integrates `MA` over the step (fatigue accrues with its time integral, recovery decays exponentially) and splits the step where the controller switches regime, at the cost of a few explicit steps whatever the `dt`. `MR` is now `1 - MA - MF`. The registered `myoFati*` envs change slightly at every control step (`MA` and `MF` by up to about 4e-4 per step), so their fatigue trajectories are not bit-identical to earlier builds.
+* **MuscleMimic resets start with the knee mechanism on its joint couplings.** Each knee drives the tibia translations and rotations and the patella through `mjEQ_JOINT` polynomials, and the patella polynomials have constant terms, so `qpos0` and the model keyframe leave the patella up to 5.2 cm off its coupling. `myoMimicFullbody-v0` reset there, and MuJoCo pulled the patella back over the first 0.3 s; until then `actuator_moment` described a pose the knee cannot reach (rectus femoris -3.2 mm about the knee instead of +50.3 mm). `MyoGymnasiumEnv.reset` now puts every coupled joint on its polynomial, with its velocity along the coupling, before `mj_forward` (`myosuite.physics.joint_coupling`, for NumPy and Torch). This changes the reset state of `myoMimicFullbody-v0`, `myoFullBodyWaypoint-v0` (whose reset noise also moved the coupled joints) and `myoFullBodyDirectional-v0`; `myoMimicBimanual-v0` was already on its couplings. The mjlab tasks reset the same way: the MuscleMimic keyframe and RSI clip frames (also of the SAR and directional SAR tasks) and the Waypoint twin. `MuscleMimicClipEnvV0` projects its clip frames too, and the waypoint reference planner uses the same helper. Clip starts were further off: the retargeted clips of `amathislab/musclemimic-retargeted` (the directional env's and the `walking_medium06` baseline's) keep the `musclemimic_models` 1.0.5 sign of two left-knee couplings, so on the default 1.0.6 their `knee_angle_rotation3_l` started up to 0.5 rad off; the clip references in observations and rewards are unchanged. The leg envs follow in the next entry; the MyoChallenge envs are unchanged. The observation, action and reward definitions are unchanged; see `docs/baseline_checkpoints.md`.
+* **Leg resets start with the knee mechanism on its joint couplings.** The leg model also drives each knee's tibia translations and rotations and its patella from the knee angle, but walk keyframes 2 and 3 set the coupled joints of both knees to the values of a 0.46 rad knee angle while the knees are at 1.23 and 0.09 rad. `myoLegWalk-v0` and the rough, hilly and stairs walks therefore started with the bent knee's patella rotation 0.74 rad off its coupling, and moving 3.6 rad/s off it. The reset noise of `myoLegStandRandom-v0` moved the coupled joints too (up to 0.18 rad), and keyframe 0 of the directional walks is 3.5e-5 off. `LegWalkEnvV0`, `LegTerrainEnvV0`, `LegReachEnvV0` (before it places its targets) and `ModularTaskEnv` now project with `MyoGymnasiumEnv._project_joint_couplings` before `mj_forward`. Their mjlab twins project in `reset_to_cpu_state`, which now takes the CPU model's couplings (`couplings=CompiledModelInfo.couplings`). This changes the start state of these ids and of their `myoFati`/`myoSarc` variants, and the parity baselines of `myoLegWalk-v0` and `myoLegRoughTerrainWalk-v0` are regenerated. `test_joint_coupling.py` now checks MuJoCo's equality residuals after `reset` for every registered env, with the MyoChallenge envs as expected failures, and `test_mjlab_cpu_twins.py` checks the twins. The observation, action and reward definitions are unchanged, but the published `myoLegWalk-v0` checkpoint, trained from the old start, falls from the new one; see `docs/baseline_checkpoints.md`.
+
+[#136]: https://github.com/MyoHub/myosuite/issues/136
+[#307]: https://github.com/MyoHub/myosuite/issues/307
+[#522]: https://github.com/MyoHub/myosuite/pull/522
+[#531]: https://github.com/MyoHub/myosuite/pull/531
+[#540]: https://github.com/MyoHub/myosuite/pull/540
+[#563]: https://github.com/MyoHub/myosuite/issues/563
+[#566]: https://github.com/MyoHub/myosuite/issues/566
+[#572]: https://github.com/MyoHub/myosuite/pull/572
+[#588]: https://github.com/MyoHub/myosuite/pull/588
+[#607]: https://github.com/MyoHub/myosuite/pull/607
+[#613]: https://github.com/MyoHub/myosuite/pull/613
+[#614]: https://github.com/MyoHub/myosuite/pull/614
+[#616]: https://github.com/MyoHub/myosuite/pull/616
+[#617]: https://github.com/MyoHub/myosuite/pull/617
+
+## [3.0.0] - 2026-10-07
+
+Changes since the last official release, **v2.12.2** (2026-05-06). `git log v2.12.2..v3.0.0` has the
+full commit list.
+
+### Highlights
+
+* **One task, three execution paths, enabling massive GPU parallelization and training speed-ups.** The same `env_id` runs on the **CPU** (Gymnasium: playback, debugging, Stable-Baselines3), on **mjlab** (MuJoCo Warp + RSL-RL: thousands of parallel environments on one GPU) and on an **experimental MJX** (JAX) path. Training on the GPU is the big speed-up of this release: one RTX 5090 steps 20,000-38,000 muscle-driven environments per second (full-body MuscleMimic with 354 muscles, 1024 envs: 19.8k steps/s; the 2-billion-step MuscleMimic run finished in about 30 hours), where one CPU thread steps the much smaller hand, leg and arm tasks at about 1,000 steps/s (measured: 1.4k hand reorient, 1.3k leg walk, 0.8k arm reach). CPU and mjlab share the observation, action and timing contract, so a policy trained on the GPU can be replayed on the CPU.
+* **Trained baseline policies.** Ready-to-use policies for 36 environments (pose, reach, leg walking, torso and the MuscleMimic full body) with evaluation videos on Hugging Face (`myohub/myosuite-3-baselines`), downloaded automatically by the tutorials and `eval_mjlab_policy.py` and loadable on both the CPU and mjlab backends. Success rates are listed in `docs/baseline_checkpoints.md`. Each checkpoint folder carries a `manifest.json` with a hash of the env contract (observation and action shapes, control step): MyoSuite warns when a downloaded policy no longer matches its env, and downloads the checkpoints of the repo tag that matches your release (`v3.0`, ...), falling back to `main`.
+* **MuscleMimic support.** Full-body and bimanual MuscleMimic environments
+  (`myoMimicFullbody-v0`, `myoMuscleMimicFullbody-v0`, `myoMimicBimanual-v0`,
+  `myoMuscleMimicBimanual-v0`, `myoFullBodyDirectional-v0`), loaders for the MuscleMimic
+  checkpoints and retargeted motion datasets from Hugging Face, the `myosuite-musclemimic-fullbody-eval`
+  tool, and tutorials 5.1–5.5 (load a policy, train on CPU/JAX and with mjlab, directional
+  locomotion, SAR).
+* **Modular task framework.** A new task needs a `TaskSpec`/`EnvSpec`, term functions and a
+  `ModelBuilder` recipe, without subclassing an environment class. Term functions (observation, reward,
+  action) are backend-agnostic; `ModelBuilder` composes models from fragments, recipes and pre-built
+  `MjSpec` fragments; a data-driven `TaskConfig` environment covers simple tasks.
+* **mjlab twins of the basic suite (118 env ids).** Pose, reach (hand, finger, arm, elbow, motor finger),
+  hand numeral poses, torso (incl. exosuit) and leg tasks (walk, directional, stand, terrain), each
+  with sarcopenia, fatigue and reafferentation variants where the CPU env has them. Twins are built from
+  the CPU registration and covered by step-parity tests.
+* **Training and evaluation tooling.** Shared PPO defaults for muscle tasks, an `Episode_Metrics/success`
+  metric on every twin, `train_mjlab.py` that stops early once the deterministic policy succeeds,
+  `eval_mjlab_policy.py` (success rate, return, grid videos on both backends), and ready-made
+  policies with evaluation videos on Hugging Face (`myohub/myosuite-3-baselines`).
+* **`myo_sim` as a pip package** (replacing the git submodule); models are composed from it and the
+  hand, arm and leg orientations were re-calibrated.
+* **Muscle conditions.** Muscle-group- and sex-specific fatigue parameters from the literature, a torch
+  fatigue model with CPU parity, episode-persistent and resumable fatigue states, spec-level sarcopenia
+  and reafferentation.
+* **Muscle conditions as wrappers, one entry point.** Motor noise, fatigue, reafferentation and sarcopenia are
+  wrappers instead of env kwargs, and `make_env(EnvConfig(env_id, features=...))` builds the CPU env or the mjlab
+  twin with the same features, episode length and control step. `from myosuite import make_env` is the documented
+  way to build an env (`gym.make` still works).
+* **The full MyoChallenge suite as Gymnasium environments** (21 ids): Baoding, Bimanual, ChaseTag
+  (P1, P2, P2eval, full-body P2, 1v1 full-body), Die Reorient, OSL run, Relocate, Soccer and Table
+  Tennis, with mjlab versions of the ChaseTag full-body and Table Tennis tasks.
+* **Tutorials and documentation.** 20 notebooks in five numbered tracks (basics, training,
+  analysis, musculoskeletal modelling, MuscleMimic) with companion files in `tutorials/files/X.Y/`;
+  documentation by audience, an environment reference, backend-parity and baselines pages, and a
+  developer wiki.
+* **Installation.** `uv` installation and CI, Python 3.10–3.14, MuJoCo 3.7 or newer (no official floor, but older versions are not maintained).
+
+### Added
+
+* **Modular framework:** `TaskSpec`/`EnvSpec` registry, `ModelBuilder` (`attach_fragment`, `attach_spec`, recipes, `myo_sim` compose pipeline), shared term functions and data-driven `TaskConfig` environments ([#406]).
+* **MJX backend** (experimental) with env classes for pose, reach, walk and mimic tasks ([#354]).
+* **mjlab backend and tasks:** pose, reach, torso exosuit, leg (stand, terrain, walk, directional) and Table Tennis twins; `Episode_Metrics/success` on every twin; shared PPO defaults; vectorized Table Tennis contact detection ([#406]).
+* **MyoChallenge suite** as Gymnasium envs: P1 envs, leg-directional and 1v1 ChaseTag, full-body ChaseTag baselines ([#406], [#101]).
+* **MuscleMimic:** full-body and bimanual envs, checkpoint and motion loaders, tutorials 5.1-5.5; multi-clip training (`register_mimic_mjlab_tasks_with_clip` takes several clips); reusable full-body viewer camera `mimic_viewer_cfg` ([#406], [#436], [#475]).
+* **Training and evaluation tools:** `eval_mjlab_policy.py` (CPU/mjlab rollouts, grid videos, `--stochastic`), `train_mjlab.py` early stop on success, default-policy checkpoints and videos on Hugging Face (`myohub/myosuite-3-baselines`) ([#406], [#478]).
+* **SAR synergies re-extracted on the current envs** and installed in `tutorials/files/2.3/SAR_pretrained/`; SAR-RL and RL-E2E reach the same success on locomotion, and SAR is not consistently ahead on manipulation (2 of 6 seeds).
+* **MuscleMimic baseline:** a single-clip walking policy (2B steps; 86% of episodes reach the clip end) on Hugging Face, see `docs/baseline_checkpoints.md`.
+* **Fatigue:** muscle-group- and sex-specific fatigue parameters from the literature (Rakshit et al. 2021; Frey-Law et al. 2012), episode-persistent and resumable states, torch 3CC-r parity with the CPU model ([#406], [#421], [#491]).
+* **Targets:** `GoalSpec(target_type="site_positions")` samples per-episode targets from per-site ranges on CPU and MJX (mjlab helper `site_position_command_cfg`); `MotionClip` carries optional per-frame `weights` (#410).
+* **Muscle-command wrappers:** `MotorNoiseWrapper` (signal-dependent + constant Gaussian noise on muscle excitations, `MotorNoiseCfg.van_beers_2004()`), `FatigueWrapper`, `ReafferentationWrapper` and `SarcopeniaWrapper`; each installs a stage of the env's action pipeline, run by priority (`map -> noise -> fatigue -> reroute`), also on the mjlab twins; `ExcitationStageWrapper` adds portable custom stages (CPU env and mjlab twin) and `CtrlStageWrapper` env-aware CPU ones; they run after the built-in stages in installation order, or at an explicit `order` to insert one earlier (two equal explicit orders raise a `StageOrderWarning`) ([#488], [#502], [#505]).
+* **`make_env(EnvConfig(...))`:** one call builds an env on the CPU or on the mjlab twin with the same `features` (muscle-command wrappers, built with `wrapper_spec`), `max_episode_steps` and `num_envs`; the old `EnvConfig` fields (`model`, `scene`, `backend` timing) and `TaskConfig.to_env_config` are removed, as was the unused `config=` argument of `register_env`. `EnvConfig.features` takes wrapper classes, `(class, kwargs)` pairs or specs. `ctrl_dt` is the single timing knob (substeps and decimation follow from it; the `ModularTaskEnv` ids refuse it). The leg-directional twins take features and `ctrl_dt` like the CPU env ([#508]). `TaskConfig` no longer carries features: `muscle_fatigue`, `ActuatorGroupSpec.condition` / `.noise` and `TaskConfig.fatigue_enabled` are removed (use the wrappers; `VariantSpec(features=...)` registers them; `ModularTaskEnv` runs the stages, so the Sarc/Fati TaskConfig ids behave as before, but its additive action noise is replaced by `MotorNoiseWrapper`). A plain `make_env(env_id, backend=..., **kwargs)` works as before. The docs, tutorials, scripts and tests use `make_env` instead of `gym.make` ([#506]).
+* **References and citations:** a References page, `CITATION.cff` and citations for the MuscleMimic motion data (AMASS, KIT, GMR, KINESIS) ([#504]).
+* **Tutorials and docs:** numbered tracks with companion files in `tutorials/files/X.Y/`, SAR tutorials and pretrained pickles, a fatigue tutorial, quickstarts, environment reference, backend-parity and baselines pages ([#406], [#454], [#455]).
+
+### Changed
+
+* `myo_sim` is a pip package (was a git submodule); hand, arm and torso tasks use the composed models; pinned to 0.2.3 ([#406], [#408]).
+* **Thumb CMC joints in `myo_sim` >= 0.2.0:** the two thumb joints exchange name and range (the first CMC joint is `cmc_flexion` with range -0.78 to 0.7, it was `cmc_abduction` with -0.5 to 0.78). This affects the composed hand of the hand pose, reach and reorient tasks and Relocate; `myoHandKeyTurn*`, `myoHandObjHold*` and `myoHandPenTwirl*` keep the legacy order. The published hand baselines were trained and re-evaluated on the new order.
+* Basic-suite reward terms run on numpy, JAX and torch ([#406]); Python 3.10-3.14, MuJoCo 3.7 or newer ([#406]).
+* **Observations are no longer clipped:** every env declares a float32 `Box(-inf, inf)` (43 envs saturated at ±10). One step contract for every CPU env: float32 observations, validated reward dict, `info` carries the reward components ([#444]).
+* **Observations and rewards read the current state:** `step()` runs `mj_forward`, and the mjlab twins refresh with a full forward before rewards and terminations; 53 envs had observed one-substep-old values. Trajectories are bit-identical except OslRun ([#444]).
+* **Joint velocities are observed as `qvel * ctrl_dt` on every backend**; the directional-leg twin declares the real 5 ms step ([#437], [#449]). `ElbowPoseTask` also observes the pose error (8 to 9 values) ([#433]).
+* **Leg walk actions are `[0, 1]` activations.** `myoLegWalk-v0` and its variants (CPU and mjlab) clip the action to `[0, 1]` and use it as the muscle control; in 2.x the action was in `[-1, 1]` and went through a sigmoid (0 gave 7.6%, +1 gave 92.4%). 2.x walking policies therefore have their negative outputs clipped to 0 and need retraining or a mapping.
+* **`motorFinger*` envs use motors with four times the stock gear**, so the pose and fixed-reach tasks are learnable ([#451]).
+* **Random finger-reach tasks sample targets the fingertip can reach** (`ReachEnvV0(target_sampling="workspace")`), instead of a box of which only about 55% lies in the workspace ([#452]).
+* **`myoArmReachRandom-v0` and `myoHandReachRandom-v0` no longer start episodes beyond `far_th`:** 16.5% (arm) and 97% (hand) of the resets used to end at step 2. `far_th` is now 1.3 (arm) and 0.075 (hand), also for the variants, the mjlab twins and MJX. The published arm policy rises from 67.0% to 76.5% deterministic success; the hand policy is unaffected ([#494], [#496], [#497]).
+* **Unknown `obs_keys` raise** a `KeyError` listing the available keys (CPU envs and mjlab pose/reach/stand/walk twins; they were silently dropped), and SAR reorient honours `obs_keys`. The Relocate ids observe every hand joint (`hand_qpos` missed `md5_flexion_r`; P1 156 to 157 values), and `hand_qpos_corrected` is available again ([#477]).
+* **`myoChallengeChaseTagFBP2-v0` is one task on both backends** (537-d `chasetag_obs`, 0.01 s control step, CPU rewards on mjlab) ([#456]).
+* **CPU `myoMimicBimanual-v0` and `myoMimicFullbody-v0` are the CPU half of their mjlab twins:** observation `[qpos, qvel * ctrl_dt, act, site position, target, target - position]` (199 / 684 values), `exp(-2 * mean site error)` reward on both backends. CPU policies trained on these ids need retraining ([#475]).
+* **mjlab physics options follow the CPU models** for TableTennis and MuscleMimic ([#457]); **mjlab TableTennis** simulates the CPU scene with once-per-step scoring and per-env randomization ([#458]).
+* **MuscleMimic bridge builds its observation on the sim device** (`TorchFullbodyObsAdapter`): 20-80x faster, float32, not bit-identical to the CPU builder (agrees to about 1e-6); `obs_backend="cpu"` keeps the old path ([#486]).
+* **Performance and memory:** cached model specs ([#481]), vectorized full-body mimic observation builder ([#482]), faster OslRun step ([#483]), explicit MjData arenas for full-body Mimic and ChaseTag ([#487], [#493]) and the two-agent `myoChallengeChaseTagFBVs-v0` scene ([#498]), `colorednoise` replaces `pink-noise-rl` and `import myosuite` is 2x faster ([#480]).
+* **Fatigue dynamics follow the literature:** the rest multiplier `r` acts only at rest (Rakshit et al. 2021; commands up to `FATIGUE_REST_THRESHOLD = 0.01` count as rest, so sigmoid-mapped muscles can rest) and the `Shoulder` row uses the Frey-Law et al. (2012) fit. Retrain policies on the `myoFati*` envs ([#491], thanks @M-Colley).
+* **The `muscle_condition`, `fatigue_reset_vec`, `fatigue_reset_random` and `motor_noise` env kwargs are replaced by wrappers.** The `myoFati*`, `myoSarc*` and `myoReaf*` ids are unchanged, and rollouts are identical to the kwarg versions. Build a custom stack with `FatigueWrapper(env, fatigue_reset_random=True)` and the other wrappers, and use `env.set_fatigue_reset_random(...)` instead of `env.unwrapped.set_fatigue_reset_random(...)`; the old kwargs raise a `TypeError` that names the replacement ([#502], [#505]).
+* **Randomized die, Baoding P2 and weighted elbow resets refresh collision bounds and inertia** after editing geom sizes and masses (MuJoCo 3.8 and newer cull contacts against stale bounds); the dynamics of these envs differ from earlier builds, so re-evaluate policies and recollect datasets ([#499] review).
+* **mjlab walk, Mimic and Table Tennis steps make no host syncs** (GPU stream stalls) in MyoSuite terms, with bit-identical results: walk / terrain twins 34 / 41 per step to 0; Mimic clip mode 33, a 2-clip bank 537 (full body) and random targets 17 to 0 (one reset check on a step that resets an env); Table Tennis P1 / P2 2 / 4 per reset step to 0. `mimic_composite_reward` reports `mean_site_dist` and `solved` per env ([#500]).
+* Documentation and developer wiki cut down; tutorials simplified for newcomers ([#406]).
+
+### Fixed
+
+* **Reach and arm models:** arm-reach `IFtip` site back at the fingertip (it sat 1.8 cm short at the DIP joint since `7532d62`; the published arm policy reaches with the fingertip in 64% of episodes without retraining) ([#406]); thumb frozen and digits kept under their metacarpals ([#406]).
+* **Muscle conditions:** CPU fatigue activation rate and 3CC-r overshoot ([#421], thanks @M-Colley); per-muscle fatigue parameters for prefixed and side-suffixed names ([#430]); automatic peak force under sarcopenia ([#426]); fatigue/sarcopenia parity between CPU and mjlab ([#406]).
+* **Fatigue:** the mjlab twins honour `fatigue_reset_vec` / `fatigue_reset_random`, and `myoFatiElbowPoseTask{Fixed,Random}-v0` now fatigue ([#491]).
+* **Challenge envs:** `reset(seed=...)` reproduces the episode ([#438]); Bimanual pillars at the sampled positions ([#441]); TableTennis and SAR reorient fatigue draws from the env RNG ([#442]); TableTennis termination, relaunch and conditions ([#432]), policy action in mjlab ([#428], thanks @M-Colley) and mesh paths on any drive ([#485]); OSL controller `is_running` and `set_motor_param` ([#484]); RunTrack keyframe clamping ([#399]); ChaseTag fall threshold and opponent fall-through ([#406]). The default `render()` of the Soccer, TableTennis and Bimanual envs shows a model camera that frames the agent (`render_camera`, [#323]). The keyframes of `myoarm_bionic_bimanual.xml`, `myoarm_tabletennis.xml`, `myolegs_soccer.xml` and the ChaseTag FBP2 reset keyframe stay inside the declared joint ranges and ctrlranges (no change to the env resets; [#403], with a regression test over the shipped models).
+* **mjlab twins register themselves:** `make_env(..., backend="mjlab")` and the mjlab CLIs work in a fresh interpreter, without depending on the order in which tests import things ([#501]).
+* **Terminate on MuJoCo instability** in every CPU env ([#423]).
+* **SAR:** reorient actions, muscle conditions and stale geometry ([#434]); mjlab SAR action reaches the muscles ([#424], thanks @M-Colley); PCA whitening undone in `SARTorchTransform` ([#425], thanks @M-Colley); the bridge and activation collector ([#459]); tutorial scripts seed SAC and resume ([#455]).
+* **MuscleMimic mjlab:** resets, terminations, frame index and SAR task configs ([#436]); follow-ups: per-env target resampling, clip-rate check ([#437]); bimanual lookahead without root terms ([#439]); per-env bridge history and normalizer ([#440]); clip end scored against the last frame, `random_start` honoured ([#475]); bridge excitation mapping and name coverage ([#459]); relative angular velocity in `TorchFullbodyObsAdapter` ([#459]); multi-clip resets of partial envs ([#406]); initial-state joint-name keys and root angular velocity ([#406]).
+* **ONNX and SB3 exports** are self-contained and fold `VecNormalize` in ([#427], [#461]); two ONNX-export defects of the mimic MDP ([#407]); `find_checkpoint` skips runs of other envs ([#420]); `eval_mjlab_policy.py` reads the `actor` group ([#445]); `train_mjlab` resume and stop-on-success ([#478]).
+* **TaskConfig control step:** a control step is `n_substeps` steps of `sim_dt` on every backend, `BackendConfig` rejects a different `ctrl_dt`, and the CPU `ModularTaskEnv` sets the timestep to `sim_dt` (it scaled `joint_vel` by a `ctrl_dt` it did not simulate); the reach workspace table uses the scene's site ids ([#476]).
+* **Challenge scoring and targets:** RunTrack and ChaseTag `get_metrics` score a lost episode with the full `maxTime` again, and Baoding, Relocate, Reorient, Bimanual and TableTennis have a legacy-style `get_metrics`; `PoseEnvV0.update_target()` moves the rewarded target with the observed one; Bimanual refreshes the box inertia and rescales the visual box ([#477]).
+* **Wrapped envs forward public attributes** again (`env.mj_render()` after `gym.make`) (#378); the multi-agent env is registered without `TimeLimit` ([#463]); resolved model XML written once ([#462]; files leaked by older versions can be removed with `find myosuite -name '.myosuite_resolved_*.xml' -delete`); `register_all_envs()` is idempotent ([#406]).
+* **ReferenceMotion:** interpolation, ghost-body rendering, `examine_policy` records ([#471]); no error when time moves backwards after the last frame ([#471]).
+* **ModelBuilder options and rebuilds, full-width clips mapped by joint name, fatigue API** ([#473]); quaternion velocity wrap and wrappers ([#474]).
+* **Experimental MJX:** silent corruption and limits ([#465], thanks @M-Colley); stale tests and leg-walk host model ([#443]); reach far check from control step 2 and finger reach reading `far_th` and workspace sampling from CPU ([#497]).
+* mjlab command API compatibility and RSI event with `env_ids=None` ([#407]); leg twins' stale root velocity and heading terms ([#406]); walk rotation termination and leg model orientation ([#406]); `.gitignore` no longer hides `myosuite/**/tasks` ([#406]).
+* CI, packaging, release workflow and notebook fixes ([#447], [#467], [#478], [#479]).
+
+### Removed
+
+* `ObservationNormalizeWrapper` (unused; SB3 `VecNormalize` and mjlab's normalizer cover it) ([#502]).
+* The 2.4 DEP-RL tutorial (the 2023 baseline no longer walks on the current envs); MyoReflex Walk is now 2.4 ([#460], [#468]).
+* The myouser-specific mjlab task and helpers (now in the standalone myoInteract repository).
+* The MyoDM suite, Boxing and Saber tasks with their shared code, the `composer` package, the legacy `simhive` copies, `myosuite_init`, placeholder `*Modular-v0` registrations, the Walk Backends demo notebook, the stale examine-rollout script, Colab helpers and the unused console scripts `myosuite-musclemimic-fullbody-parity` and `myosuite-musclemimic-mjx-train` ([#406]).
+* The local `myosuite/simhive/` asset override. A leftover pre-3.0 copy shadowed the pip `myo_sim` and broke models whose meshes it lacked; assets now come only from the bundled subsets and pip. To work on a local `myo_sim` checkout, install it in editable mode (`uv pip install -e path/to/myo_sim`).
+
+### Dependencies
+
+* MuJoCo 3.7 or newer (no official floor, but older versions are not maintained); `myo_sim` 0.2.3 from PyPI; `huggingface_hub` is a base dependency; `wandb`, `orbax-checkpoint`, `jax`/`brax` pins for the mjlab and MJX extras; security bumps of `gitpython`, `urllib3` and `uv.lock`; SPDX license metadata.
+* The `furniture-sim`, `mpl-sim`, `object-sim` and `ycb-sim` git dependencies are gone: the 40 files MyoSuite uses (2.9 MB) are bundled under `myosuite/envs/myo/assets/`, so every dependency installs from PyPI.
+* The `musclemimic` extra pins `musclemimic_models==1.0.6`, which fixes the left knee (two coupling polynomials were negated relative to the right knee, so the left tibia rotated -0.25 rad about its axis at 1 rad of flexion where the right one rotated +0.25 rad) and six muscle wraps. MyoSuite's own full-body baseline (`myoMimicFullbody-v0`, walking_medium06) was trained on 1.0.6. `amathislab/mm-10m-2` was trained on 1.0.5: `model_version="1.0.5"` (or `MYOSUITE_MUSCLEMIMIC_MODELS_VERSION=1.0.5`) rebuilds the 1.0.5 model bit-exactly from the installed package, and the tutorials and the playback / eval CLIs do so for that checkpoint (`model_versions.checkpoint_models_version`, [#520]).
+* `pink-noise-rl` is replaced by `colorednoise` (`myosuite.utils.colored_noise.ColoredNoiseProcess`; seeded episodes are bit-identical) ([#480]).
+
+### Contributors
+
+Vittorio Caggiano, Florian Fischer, Balint Hodossy, Vikash Kumar, Tatsuki Tsujimoto, Hyoungseo Son,
+Cheryl Wang, Mark Colley and Calder Robbins.
+A big thanks to all MyoSuite 1.0 and 2.0 contributors, whose work this release essentially builds on!
+
+[#101]: https://github.com/MyoHub/myosuite/pull/101
+[#323]: https://github.com/MyoHub/myosuite/issues/323
+[#354]: https://github.com/MyoHub/myosuite/pull/354
+[#399]: https://github.com/MyoHub/myosuite/pull/399
+[#403]: https://github.com/MyoHub/myosuite/issues/403
+[#406]: https://github.com/MyoHub/myosuite/pull/406
+[#407]: https://github.com/MyoHub/myosuite/pull/407
+[#408]: https://github.com/MyoHub/myosuite/pull/408
+[#420]: https://github.com/MyoHub/myosuite/pull/420
+[#421]: https://github.com/MyoHub/myosuite/pull/421
+[#423]: https://github.com/MyoHub/myosuite/pull/423
+[#424]: https://github.com/MyoHub/myosuite/pull/424
+[#425]: https://github.com/MyoHub/myosuite/pull/425
+[#426]: https://github.com/MyoHub/myosuite/pull/426
+[#427]: https://github.com/MyoHub/myosuite/pull/427
+[#428]: https://github.com/MyoHub/myosuite/pull/428
+[#430]: https://github.com/MyoHub/myosuite/pull/430
+[#432]: https://github.com/MyoHub/myosuite/pull/432
+[#433]: https://github.com/MyoHub/myosuite/pull/433
+[#434]: https://github.com/MyoHub/myosuite/pull/434
+[#436]: https://github.com/MyoHub/myosuite/pull/436
+[#437]: https://github.com/MyoHub/myosuite/pull/437
+[#438]: https://github.com/MyoHub/myosuite/pull/438
+[#439]: https://github.com/MyoHub/myosuite/pull/439
+[#440]: https://github.com/MyoHub/myosuite/pull/440
+[#441]: https://github.com/MyoHub/myosuite/pull/441
+[#442]: https://github.com/MyoHub/myosuite/pull/442
+[#443]: https://github.com/MyoHub/myosuite/pull/443
+[#444]: https://github.com/MyoHub/myosuite/pull/444
+[#445]: https://github.com/MyoHub/myosuite/pull/445
+[#447]: https://github.com/MyoHub/myosuite/pull/447
+[#449]: https://github.com/MyoHub/myosuite/pull/449
+[#451]: https://github.com/MyoHub/myosuite/pull/451
+[#452]: https://github.com/MyoHub/myosuite/pull/452
+[#454]: https://github.com/MyoHub/myosuite/pull/454
+[#455]: https://github.com/MyoHub/myosuite/pull/455
+[#456]: https://github.com/MyoHub/myosuite/pull/456
+[#457]: https://github.com/MyoHub/myosuite/pull/457
+[#458]: https://github.com/MyoHub/myosuite/pull/458
+[#459]: https://github.com/MyoHub/myosuite/pull/459
+[#460]: https://github.com/MyoHub/myosuite/pull/460
+[#461]: https://github.com/MyoHub/myosuite/pull/461
+[#462]: https://github.com/MyoHub/myosuite/pull/462
+[#463]: https://github.com/MyoHub/myosuite/pull/463
+[#465]: https://github.com/MyoHub/myosuite/pull/465
+[#467]: https://github.com/MyoHub/myosuite/pull/467
+[#468]: https://github.com/MyoHub/myosuite/pull/468
+[#471]: https://github.com/MyoHub/myosuite/pull/471
+[#473]: https://github.com/MyoHub/myosuite/pull/473
+[#474]: https://github.com/MyoHub/myosuite/pull/474
+[#475]: https://github.com/MyoHub/myosuite/pull/475
+[#476]: https://github.com/MyoHub/myosuite/pull/476
+[#477]: https://github.com/MyoHub/myosuite/pull/477
+[#478]: https://github.com/MyoHub/myosuite/pull/478
+[#479]: https://github.com/MyoHub/myosuite/pull/479
+[#480]: https://github.com/MyoHub/myosuite/pull/480
+[#481]: https://github.com/MyoHub/myosuite/pull/481
+[#482]: https://github.com/MyoHub/myosuite/pull/482
+[#483]: https://github.com/MyoHub/myosuite/pull/483
+[#484]: https://github.com/MyoHub/myosuite/pull/484
+[#485]: https://github.com/MyoHub/myosuite/pull/485
+[#486]: https://github.com/MyoHub/myosuite/pull/486
+[#487]: https://github.com/MyoHub/myosuite/pull/487
+[#488]: https://github.com/MyoHub/myosuite/pull/488
+[#491]: https://github.com/MyoHub/myosuite/pull/491
+[#493]: https://github.com/MyoHub/myosuite/pull/493
+[#494]: https://github.com/MyoHub/myosuite/pull/494
+[#496]: https://github.com/MyoHub/myosuite/pull/496
+[#497]: https://github.com/MyoHub/myosuite/pull/497
+[#498]: https://github.com/MyoHub/myosuite/pull/498
+[#499]: https://github.com/MyoHub/myosuite/pull/499
+[#500]: https://github.com/MyoHub/myosuite/pull/500
+[#501]: https://github.com/MyoHub/myosuite/pull/501
+[#502]: https://github.com/MyoHub/myosuite/issues/502
+[#504]: https://github.com/MyoHub/myosuite/pull/504
+[#505]: https://github.com/MyoHub/myosuite/pull/505
+[#506]: https://github.com/MyoHub/myosuite/pull/506
+[#508]: https://github.com/MyoHub/myosuite/pull/508
+[#520]: https://github.com/MyoHub/myosuite/pull/520
+
+## [2.12.2] - 2026-05-06
+* Asset credits updated ([#392]).
+
+[#392]: https://github.com/MyoHub/myosuite/pull/392
+
+## [2.12.1] - 2026-04-23
+* `make_data(naccdmax=...)` enabled; MuJoCo 3.6.0 ([#390]).
+
+[#390]: https://github.com/MyoHub/myosuite/pull/390
+
+## [2.12.0] - 2026-04-23
+* `uv` installation, CI and MJX environment updates ([#387]); PyPI release CI Python version fixed ([#389]).
+
+[#387]: https://github.com/MyoHub/myosuite/pull/387
+[#389]: https://github.com/MyoHub/myosuite/pull/389
+
+## [2.11.6] - 2025-11-04
+* Soccer P2: goalkeeper position added to the observations ([#360]).
+
+[#360]: https://github.com/MyoHub/myosuite/pull/360
+
+## [2.11.5] - 2025-10-01
+* Inverse-dynamics tutorial fixed ([#349]).
+
+[#349]: https://github.com/MyoHub/myosuite/pull/349
+
+## [2.11.4] - 2025-09-26
+* Table Tennis P2 hotfix ([#345]).
+
+[#345]: https://github.com/MyoHub/myosuite/pull/345
+
+## [2.11.3] - 2025-09-23
+* MyoChallenge 2025: Table Tennis P2 ([#338]), Soccer P2 ([#339]) and the Phase 2 tasks ([#340]); CI fixes ([#341], [#342], [#343]).
+
+[#338]: https://github.com/MyoHub/myosuite/pull/338
+[#339]: https://github.com/MyoHub/myosuite/pull/339
+[#340]: https://github.com/MyoHub/myosuite/pull/340
+[#341]: https://github.com/MyoHub/myosuite/pull/341
+[#342]: https://github.com/MyoHub/myosuite/pull/342
+[#343]: https://github.com/MyoHub/myosuite/pull/343
+
+## [2.10.0 - 2.10.3] - 2025-08
+* 2.10.0 (08-11): license update ([#322]), HTML utils ([#321]), `myoArmReachRandom-v0` ([#232]), MyoChallenge 2025 updates ([#325], [#330]: Soccer randomizations and metrics), `version.py` synced with PyPI ([#331]).
+* 2.10.1 - 2.10.3 (08-19): automated CI version bumps only ([#333], [#335], [#336]).
+
+[#232]: https://github.com/MyoHub/myosuite/pull/232
+[#321]: https://github.com/MyoHub/myosuite/pull/321
+[#322]: https://github.com/MyoHub/myosuite/pull/322
+[#325]: https://github.com/MyoHub/myosuite/pull/325
+[#331]: https://github.com/MyoHub/myosuite/pull/331
+[#333]: https://github.com/MyoHub/myosuite/pull/333
+[#335]: https://github.com/MyoHub/myosuite/pull/335
+[#336]: https://github.com/MyoHub/myosuite/pull/336
+
+## [2.9.0] - 2025-07-11
+* Tutorials: inverse kinematics ([#298]), OpenSim `.mot` playback on the MyoSkeleton ([#302]), computed-muscle-control elbow ([#301]); minimum Python 3.9 ([#303]).
+* MyoChallenge 2025: Soccer ([#309]), Table Tennis base env ([#308]), MC25 tasks ([#314], [#316]); loco head-site fixes ([#310], [#312]); `import myosuite` before SB3 so envs are registered ([#270]); PyPI release CI ([#315]).
+* v2.8.6 is the same commit as 2.9.0.
+
+[#270]: https://github.com/MyoHub/myosuite/pull/270
+[#298]: https://github.com/MyoHub/myosuite/pull/298
+[#301]: https://github.com/MyoHub/myosuite/pull/301
+[#302]: https://github.com/MyoHub/myosuite/pull/302
+[#303]: https://github.com/MyoHub/myosuite/pull/303
+[#308]: https://github.com/MyoHub/myosuite/pull/308
+[#309]: https://github.com/MyoHub/myosuite/pull/309
+[#310]: https://github.com/MyoHub/myosuite/pull/310
+[#312]: https://github.com/MyoHub/myosuite/pull/312
+[#314]: https://github.com/MyoHub/myosuite/pull/314
+[#315]: https://github.com/MyoHub/myosuite/pull/315
+[#316]: https://github.com/MyoHub/myosuite/pull/316
+
+## [2.8.0 - 2.8.4] - 2024-09 to 2024-10
+* 2.8.0 (09-23): MyoChallenge 2024 Phase 2 ([#229]) and eval phase ([#223]), locomotion metrics ([#214]) and action-space fix ([#230]), Run Track P2 ([#226]), bimanual variations ([#216]), randomization and OSL changes ([#227]), reflex tutorial fix ([#233]).
+* 2.8.1 (09-27): locomotion observation fixes ([#247], [#248]). 2.8.2 (10-02): hfield observation fixes ([#251], [#252]). 2.8.3 (10-28): object-target proximity threshold ([#258], [#259]), TensorBoard directory for W&B ([#256]). 2.8.4 (10-31): manipulation env fixes ([#262], [#265]).
+
+[#214]: https://github.com/MyoHub/myosuite/pull/214
+[#216]: https://github.com/MyoHub/myosuite/pull/216
+[#223]: https://github.com/MyoHub/myosuite/pull/223
+[#226]: https://github.com/MyoHub/myosuite/pull/226
+[#227]: https://github.com/MyoHub/myosuite/pull/227
+[#229]: https://github.com/MyoHub/myosuite/pull/229
+[#230]: https://github.com/MyoHub/myosuite/pull/230
+[#233]: https://github.com/MyoHub/myosuite/pull/233
+[#247]: https://github.com/MyoHub/myosuite/pull/247
+[#248]: https://github.com/MyoHub/myosuite/pull/248
+[#251]: https://github.com/MyoHub/myosuite/pull/251
+[#252]: https://github.com/MyoHub/myosuite/pull/252
+[#256]: https://github.com/MyoHub/myosuite/pull/256
+[#258]: https://github.com/MyoHub/myosuite/pull/258
+[#259]: https://github.com/MyoHub/myosuite/pull/259
+[#262]: https://github.com/MyoHub/myosuite/pull/262
+[#265]: https://github.com/MyoHub/myosuite/pull/265
+
+## [2.7.0] - 2024-09-01
+* MyoSkeleton model ([#217]); MyoChallenge manipulation-track metric ([#213]); `obsvec` matches the observation space ([#205]).
+
+[#205]: https://github.com/MyoHub/myosuite/pull/205
+[#213]: https://github.com/MyoHub/myosuite/pull/213
+[#217]: https://github.com/MyoHub/myosuite/pull/217
+
+## [2.5.0] - 2024-07-28
+* MyoChallenge 2024 tasks ([#192]); documentation update ([#190]).
+
+[#190]: https://github.com/MyoHub/myosuite/pull/190
+[#192]: https://github.com/MyoHub/myosuite/pull/192
+
+## [2.4.0] - 2024-05-13
+[FEATURE] Added 3CC-r Fatigue Model (#167). Thanks to @fl0fischer
+[FEATURE] Update to MuJoCo 3.1.2 and dm-control 1.0.16 (2bddf8c)
+[BUGFIX] Fixed Tutorial `2_Load_Policy.ipynb` (038457a)
+
+## [2.3.0] - 2024-05-01
+[FEATURE] Support for both Gym/Gymnasium (#142)
+[FEATURE] Add support for TorchRL by @vmoens (5efdf93)
+[FEATURE] Improve Inverse Dynamics tutorial (98daff2). Thanks to @andreh1111
+
+## [2.2.0] - 2024-01-20
+[FEATURE] Inverse dynamics tutorial. Thanks to @andreh1111 #121
+[RELEASE] MyoArm and MyoLeg models (4c01023, cd9a25e)
+[RELEASE] MyoChallenge'23 environments release (#128)
+[BUGFIX] Fixed heightfield collisions for myoleg scenes #132
+[BUGFIX] Fixed names of data keys from _int to _init in myodm by @andreh1111 in (#119)
+
+## [1.3.0] - 2023-01-11
+- Rebase and building on RoboHive v0.3
+
+## [1.2.4] - 2022-11-12
+- fix Baoding Ball environment for MyoChallenge Phase 1
+
+## [1.2.3] - 2022-10-21
+- update horizon for MyoChallenge Die Reorient task - Phase 2
+
+## [1.2.2] - 2022-10-21
+- update MyoChallenge Die Reorient task and Baoding Ball to Phase 2
+
+## [1.2.1] - 2022-10-09
+- update horizon for MyoChallenge Die Reorient task
+- update tutorials
+
+## [1.2.0] - 2022-08-13
+- Rebase and building on RoboHive v0.2
+- Adding the myochallenge envs
+- Fundamental bugfixes on the RoboHive engine
+- Bugfixes on myo environments as well
+- Closes baselines are on RoboHive-v0.2
+- Next planned baseline release will align when Robohive-v0.3dev moves to prerelease.
+- Renaming the metrics for clarity and changed sign from `act_mag` to `effort` and `solved` to `score`
+
+## [1.1.0] - 2022-08-12
+- Upgrade to mj_env v0.2 experimental
+- add Die Rotation and Baoding Ball task for MyoChallenge (https://sites.google.com/view/myochallenge)
+
+## [1.0.1] - 2022-05-23
+- First Release of MyoSuite.
+- Basic Documentation
+
+[#330]: https://github.com/MyoHub/myosuite/pull/330

@@ -1,0 +1,1 @@
+This directory is a modified copy of MyoSuite (https://github.com/MyoHub/myosuite) at commit 3249e36f05210e22c0cb0631e9b9e8314fafa36f, distributed under the Apache License, Version 2.0 (see LICENSE).
